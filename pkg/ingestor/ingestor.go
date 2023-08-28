@@ -238,7 +238,82 @@ func (i *ingestor) Run(ctx context.Context) {
 }
 
 func (i *ingestor) trackPods(ctx context.Context) {
-	ticker := time.NewTicker(time.Second * 30)
+
+	cloneApps := func() []Application {
+		i.lock.RLock()
+		defer i.lock.RUnlock()
+		apps := make([]Application, len(i.config.Applications))
+		copy(apps, i.config.Applications)
+		return apps
+	}
+
+	runOnce := func() {
+		apps := cloneApps()
+		for _, app := range apps {
+			var selector *metav1.LabelSelector
+			switch app.Type {
+			case "deployment":
+				deploy, err := i.k8sclient.AppsV1().Deployments(app.Namespace).Get(ctx, app.Name, metav1.GetOptions{})
+				if err != nil {
+					i.logger.Errorw("failed to get deployment", zap.String("namespace", app.Namespace), zap.String("name", app.Name), zap.Error(err))
+					continue
+				}
+				selector = deploy.Spec.Selector
+			case "statefulset":
+				sts, err := i.k8sclient.AppsV1().StatefulSets(app.Namespace).Get(ctx, app.Name, metav1.GetOptions{})
+				if err != nil {
+					i.logger.Errorw("failed to get statefulset", zap.String("namespace", app.Namespace), zap.String("name", app.Name), zap.Error(err))
+					continue
+				}
+				selector = sts.Spec.Selector
+			case "daemonset":
+				ds, err := i.k8sclient.AppsV1().DaemonSets(app.Namespace).Get(ctx, app.Name, metav1.GetOptions{})
+				if err != nil {
+					i.logger.Errorw("failed to get daemonset", zap.String("namespace", app.Namespace), zap.String("name", app.Name), zap.Error(err))
+					continue
+				}
+				selector = ds.Spec.Selector
+			case "rollout":
+				ro, err := i.dynclient.Resource(schema.GroupVersionResource{
+					Group:    "argoproj.io",
+					Version:  "v1alpha1",
+					Resource: "rollouts",
+				}).Namespace(app.Namespace).Get(ctx, app.Name, metav1.GetOptions{})
+				if err != nil {
+					i.logger.Errorw("failed to get rollout", zap.String("namespace", app.Namespace), zap.String("name", app.Name), zap.Error(err))
+					continue
+				}
+				selector = ro.Object["spec"].(map[string]interface{})["selector"].(*metav1.LabelSelector)
+			default:
+				i.logger.Errorw("unknown application type", zap.String("type", app.Type))
+				continue
+			}
+			if selector == nil {
+				continue
+			}
+			pods, err := i.k8sclient.CoreV1().Pods(app.Namespace).List(ctx, metav1.ListOptions{
+				LabelSelector: metav1.FormatLabelSelector(selector),
+			})
+			if err != nil {
+				i.logger.Errorw("failed to list pods", zap.String("namespace", app.Namespace), zap.String("name", app.Name), zap.Error(err))
+				continue
+			}
+			for _, pod := range pods.Items {
+				for _, c := range pod.Spec.Containers {
+					key := fmt.Sprintf("%s/%s/%s/%s/%s", pod.Namespace, app.Type, app.Name, pod.Name, c.Name)
+					if !i.Contains(key) {
+						// Only add new key here, removing invalid keys will be handled by the worker.
+						i.StartWatching(key)
+						i.logger.Infow("Start watching", zap.String("namespace", pod.Namespace), zap.String("podName", pod.Name), zap.String("containerName", c.Name))
+					}
+				}
+			}
+		}
+	}
+
+	runOnce()
+
+	ticker := time.NewTicker(time.Second * 60)
 	defer ticker.Stop()
 	for {
 		select {
@@ -246,72 +321,7 @@ func (i *ingestor) trackPods(ctx context.Context) {
 			i.logger.Info("Shutting down the pod tracker")
 			return
 		case <-ticker.C:
-			var apps []Application
-			{
-				i.lock.RLock()
-				defer i.lock.RUnlock()
-				apps = make([]Application, len(i.config.Applications))
-				copy(apps, i.config.Applications)
-			}
-			for _, app := range apps {
-				var selector *metav1.LabelSelector
-				switch app.Type {
-				case "deployment":
-					deploy, err := i.k8sclient.AppsV1().Deployments(app.Namespace).Get(ctx, app.Name, metav1.GetOptions{})
-					if err != nil {
-						i.logger.Errorw("failed to get deployment", zap.String("namespace", app.Namespace), zap.String("name", app.Name), zap.Error(err))
-						continue
-					}
-					selector = deploy.Spec.Selector
-				case "statefulset":
-					sts, err := i.k8sclient.AppsV1().StatefulSets(app.Namespace).Get(ctx, app.Name, metav1.GetOptions{})
-					if err != nil {
-						i.logger.Errorw("failed to get statefulset", zap.String("namespace", app.Namespace), zap.String("name", app.Name), zap.Error(err))
-						continue
-					}
-					selector = sts.Spec.Selector
-				case "daemonset":
-					ds, err := i.k8sclient.AppsV1().DaemonSets(app.Namespace).Get(ctx, app.Name, metav1.GetOptions{})
-					if err != nil {
-						i.logger.Errorw("failed to get daemonset", zap.String("namespace", app.Namespace), zap.String("name", app.Name), zap.Error(err))
-						continue
-					}
-					selector = ds.Spec.Selector
-				case "rollout":
-					ro, err := i.dynclient.Resource(schema.GroupVersionResource{
-						Group:    "argoproj.io",
-						Version:  "v1alpha1",
-						Resource: "rollouts",
-					}).Namespace(app.Namespace).Get(ctx, app.Name, metav1.GetOptions{})
-					if err != nil {
-						i.logger.Errorw("failed to get rollout", zap.String("namespace", app.Namespace), zap.String("name", app.Name), zap.Error(err))
-						continue
-					}
-					selector = ro.Object["spec"].(map[string]interface{})["selector"].(*metav1.LabelSelector)
-				default:
-					i.logger.Errorw("unknown application type", zap.String("type", app.Type))
-				}
-				if selector == nil {
-					continue
-				}
-				pods, err := i.k8sclient.CoreV1().Pods(app.Namespace).List(ctx, metav1.ListOptions{
-					LabelSelector: metav1.FormatLabelSelector(selector),
-				})
-				if err != nil {
-					i.logger.Errorw("failed to list pods", zap.String("namespace", app.Namespace), zap.String("name", app.Name), zap.Error(err))
-					continue
-				}
-				for _, pod := range pods.Items {
-					for _, c := range pod.Spec.Containers {
-						key := fmt.Sprintf("%s/%s/%s/%s/%s", pod.Namespace, app.Type, app.Name, pod.Name, c.Name)
-						if !i.Contains(key) {
-							// Only add new key here, removing invalid keys will be handled by the worker.
-							i.StartWatching(key)
-							i.logger.Infow("Start watching", zap.String("namespace", pod.Namespace), zap.String("podName", pod.Name), zap.String("containerName", c.Name))
-						}
-					}
-				}
-			}
+			runOnce()
 		}
 	}
 }
@@ -366,6 +376,10 @@ func (i *ingestor) readPodLogs(ctx context.Context, k8sclient kubernetes.Interfa
 		SinceTime:  &metav1.Time{Time: lastTime},
 	}).Stream(ctx)
 	if err != nil {
+		// Stop watching
+		i.StopWatching(key)
+		_ = i.podInfoCache.Remove(key)
+		i.logger.Infow("Stop watching", zap.String("namespace", namespace), zap.String("podName", podName), zap.String("containerName", containerName))
 		return nil, time.Time{}, err
 	}
 	defer func() { _ = stream.Close() }()
