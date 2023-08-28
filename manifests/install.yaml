@@ -1,0 +1,146 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: log-ingestor-sa
+  namespace: log-ingestor
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: log-ingestor-role
+  namespace: log-ingestor
+rules:
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: log-ingestor-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - pods/log
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  - statefulsets
+  - daemonsets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - argoproj.io
+  resources:
+  - rollouts
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: log-ingestor-role-binding
+  namespace: log-ingestor
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: log-ingestor-role
+subjects:
+- kind: ServiceAccount
+  name: log-ingestor-sa
+  namespace: log-ingestor
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: log-ingestor-cluster-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: log-ingestor-role
+subjects:
+- kind: ServiceAccount
+  name: log-ingestor-sa
+  namespace: log-ingestor
+---
+apiVersion: v1
+data:
+  config.yaml: |
+    applications:
+      #- namespace: my-ns
+      #  name: my-name
+      #  type: deployment
+kind: ConfigMap
+metadata:
+  name: log-ingestor-config
+  namespace: log-ingestor
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: log-ingestor
+  name: log-ingestor
+  namespace: log-ingestor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: log-ingestor
+  template:
+    metadata:
+      labels:
+        app: log-ingestor
+    spec:
+      containers:
+      - args:
+        - --ingestion-url=http://test
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        image: quay.io/numaio/log-ingestor:latest
+        name: main
+        resources:
+          limits:
+            cpu: 500m
+            memory: 1024Mi
+          requests:
+            cpu: 100m
+            memory: 200Mi
+        volumeMounts:
+        - mountPath: /etc/config/log-ingestor
+          name: config-vol
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 7039
+      serviceAccountName: log-ingestor-sa
+      volumes:
+      - configMap:
+          name: log-ingestor-config
+        name: config-vol

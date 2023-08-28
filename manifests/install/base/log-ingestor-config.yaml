@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: log-ingestor-config
+data:
+  config.yaml: |+
+    applications:
+      #- namespace: my-ns
+      #  name: my-name
+      #  type: deployment

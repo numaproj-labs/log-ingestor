@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../manifests/install
+patches:
+  - patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: IfNotPresent
+    target:
+      kind: Deployment
+      name: log-ingestor
+
+namespace: log-ingestor
+
+commonLabels:
+  "app.kubernetes.io/part-of": "log-ingestor"

@@ -140,7 +140,7 @@ func (i *ingestor) loadConfig(onErrorReloading func(error)) (*Config, error) {
 	v := viper.New()
 	v.SetConfigName("config")
 	v.SetConfigType("yaml")
-	v.AddConfigPath("/etc/ingestor")
+	v.AddConfigPath("/etc/config/log-ingestor")
 	err := v.ReadInConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load configuration file. %w", err)

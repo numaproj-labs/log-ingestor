@@ -1,0 +1,7 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- log-ingestor-sa.yaml
+- log-ingestor-deployment.yaml
+- log-ingestor-config.yaml

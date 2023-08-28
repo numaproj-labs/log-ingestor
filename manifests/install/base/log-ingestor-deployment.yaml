@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: log-ingestor
+  name: log-ingestor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: log-ingestor
+  template:
+    metadata:
+      labels:
+        app: log-ingestor
+    spec:
+      serviceAccountName: log-ingestor-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 7039
+      containers:
+      - image: quay.io/numaio/log-ingestor:latest
+        name: main
+        volumeMounts:
+        - name: config-vol
+          mountPath: /etc/config/log-ingestor
+        args:
+        - --ingestion-url=http://test
+        resources:
+          limits:
+            cpu: 500m
+            memory: 1024Mi
+          requests:
+            cpu: 100m
+            memory: 200Mi
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+      volumes:
+      - name: config-vol
+        configMap:
+          name: log-ingestor-config
