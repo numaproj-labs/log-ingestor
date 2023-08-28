@@ -1,1 +1,1 @@
-# numalogic-data-injector
+# Log Ingestor
