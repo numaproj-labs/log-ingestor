@@ -238,7 +238,7 @@ func (i *ingestor) Run(ctx context.Context) {
 }
 
 func (i *ingestor) trackPods(ctx context.Context) {
-	ticker := time.NewTicker(time.Second * 60)
+	ticker := time.NewTicker(time.Second * 30)
 	defer ticker.Stop()
 	for {
 		select {
@@ -307,9 +307,9 @@ func (i *ingestor) trackPods(ctx context.Context) {
 						if !i.Contains(key) {
 							// Only add new key here, removing invalid keys will be handled by the worker.
 							i.StartWatching(key)
+							i.logger.Infow("Start watching", zap.String("namespace", pod.Namespace), zap.String("podName", pod.Name), zap.String("containerName", c.Name))
 						}
 					}
-					i.logger.Infow("Start watching pod", zap.String("namespace", pod.Namespace), zap.String("name", pod.Name))
 				}
 			}
 		}
@@ -317,7 +317,7 @@ func (i *ingestor) trackPods(ctx context.Context) {
 }
 
 func (i *ingestor) run(ctx context.Context, defaultStartTime time.Time, workerID int, keyCh chan string) {
-	i.logger.Infof("Started autoscaling worker %v", workerID)
+	i.logger.Infof("Started worker %v", workerID)
 	for {
 		select {
 		case <-ctx.Done():
