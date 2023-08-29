@@ -22,14 +22,16 @@ func main() {
 	logger := logging.NewLogger()
 
 	var (
-		ingestionURL     string
-		workers          int
-		lookbackDuration time.Duration
+		ingestionURL       string
+		workers            int
+		lookbackDuration   time.Duration
+		taskIntervalMillis int
 	)
 
 	flag.StringVar(&ingestionURL, "ingestion-url", "", "URL for the ingestion endpoint.")
 	flag.IntVar(&workers, "workers", 20, "Number of workers to process logs.")
 	flag.DurationVar(&lookbackDuration, "lookback-duration", time.Second*60, "The duration of time to look back for logs.")
+	flag.IntVar(&taskIntervalMillis, "task-interval", 30000, "Each element in the work queue will be picked up in an interval of this period of milliseconds.")
 	flag.Parse()
 
 	if ingestionURL == "" {
@@ -60,6 +62,7 @@ func main() {
 
 	opts := []ingestor.Option{
 		ingestor.WithLookbackDuration(lookbackDuration),
+		ingestor.WithTaskIntervalMillis(taskIntervalMillis),
 		ingestor.WithWorkers(workers),
 	}
 

@@ -8,8 +8,8 @@ import (
 
 type Option func(*ingestor)
 
-// WithTaskInterval sets a time in milliseconds, each element in the work queue will be picked up in an interval of this period of time.
-func WithTaskInterval(f int) Option {
+// WithTaskIntervalMillis sets a time in milliseconds, each element in the work queue will be picked up in an interval of this period of time.
+func WithTaskIntervalMillis(f int) Option {
 	return func(o *ingestor) {
 		o.taskInterval = f
 	}

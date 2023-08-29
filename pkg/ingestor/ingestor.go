@@ -475,7 +475,7 @@ func (i *ingestor) sendLogs(ctx context.Context, namespace, appName, appType, po
 	s, _ = sjson.Set(s, "summarization_name", podName)
 	s, _ = sjson.Set(s, "logs", logs)
 	// TODO:
-	if false {
+	if true {
 		resp, err := i.httpClient.Post(i.ingestionURL, "application/json", strings.NewReader(s))
 		if err != nil {
 			return err

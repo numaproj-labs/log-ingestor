@@ -6,11 +6,11 @@ BINARY_NAME:=log-ingestor
 # docker image publishing options
 DOCKER_PUSH?=false
 IMAGE_NAMESPACE?=quay.io/numaio
-IMAGE_TAG?=latest
-
 DOCKERFILE:=Dockerfile
 
 VERSION?=latest
+BASE_VERSION:=latest
+
 BUILD_DATE=$(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 GIT_COMMIT=$(shell git rev-parse HEAD)
 GIT_TAG=$(shell if [ -z "`git status --porcelain`" ]; then git describe --exact-match --tags HEAD 2>/dev/null; fi)
@@ -26,11 +26,6 @@ ifeq (${DOCKER_PUSH},true)
 ifndef IMAGE_NAMESPACE
 $(error IMAGE_NAMESPACE must be set to push images (e.g. IMAGE_NAMESPACE=quay.io/numaio))
 endif
-endif
-
-ifneq (${GIT_TAG},)
-IMAGE_TAG=${GIT_TAG}
-override LDFLAGS += -X ${PACKAGE}.gitTag=${GIT_TAG}
 endif
 
 CURRENT_CONTEXT:=$(shell [[ "`command -v kubectl`" != '' ]] && kubectl config current-context 2> /dev/null || echo "unset")
@@ -60,8 +55,8 @@ ${DIST_DIR}/$(BINARY_NAME)-%:
 	CGO_ENABLED=0 $(GOARGS) go build -v -ldflags '${LDFLAGS}' -o ${DIST_DIR}/$(BINARY_NAME) ./main.go
 
 image: $(DIST_DIR)/$(BINARY_NAME)-linux-amd64
-	$(DOCKER) build -t $(IMAGE_NAMESPACE)/$(BINARY_NAME):$(IMAGE_TAG)  -f $(DOCKERFILE) .
-	@if [ "$(DOCKER_PUSH)" = "true" ] ; then  docker push $(IMAGE_NAMESPACE)/$(BINARY_NAME):$(IMAGE_TAG) ; fi
+	$(DOCKER) build -t $(IMAGE_NAMESPACE)/$(BINARY_NAME):$(VERSION)  -f $(DOCKERFILE) .
+	@if [ "$(DOCKER_PUSH)" = "true" ] ; then  docker push $(IMAGE_NAMESPACE)/$(BINARY_NAME):$(VERSION) ; fi
 ifdef IMAGE_IMPORT_CMD
 	$(IMAGE_IMPORT_CMD) $(IMAGE_NAMESPACE)/$(BINARY_NAME):$(VERSION)
 endif
@@ -72,7 +67,7 @@ clean:
 .PHONY: start
 start: image
 	kubectl apply -f test/manifests/log-ingestor-ns.yaml
-	kubectl kustomize test/manifests | sed 's@quay.io/numaio/@$(IMAGE_NAMESPACE)/@' | kubectl -n log-ingestor apply -l app.kubernetes.io/part-of=log-ingestor --prune=false --force -f -
+	kubectl kustomize test/manifests | sed 's@quay.io/numaio/@$(IMAGE_NAMESPACE)/@' | sed 's/:$(BASE_VERSION)/:$(VERSION)/' | kubectl -n log-ingestor apply -l app.kubernetes.io/part-of=log-ingestor --prune=false --force -f -
 	kubectl -n log-ingestor wait -lapp.kubernetes.io/part-of=log-ingestor --for=condition=Ready --timeout 60s pod --all
 
 
