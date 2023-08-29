@@ -1,9 +1,10 @@
 package ingestor
 
 type Application struct {
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
-	Type      string `json:"type"`
+	Namespace  string   `json:"namespace"`
+	Name       string   `json:"name"`
+	Type       string   `json:"type"`
+	Containers []string `json:"containers"`
 }
 
 type Config struct {

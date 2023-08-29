@@ -3,7 +3,8 @@ package logging
 import (
 	"os"
 
-	zap "go.uber.org/zap"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 const (
@@ -21,6 +22,7 @@ func NewLogger() *zap.SugaredLogger {
 		config = zap.NewProductionConfig()
 	}
 	// Config customization goes here if any
+	config.EncoderConfig.EncodeTime = zapcore.RFC3339NanoTimeEncoder
 	config.OutputPaths = []string{"stdout"}
 	logger, err := config.Build()
 	if err != nil {

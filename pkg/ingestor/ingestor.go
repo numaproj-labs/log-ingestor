@@ -7,10 +7,12 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/araddon/dateparse"
 	"github.com/fsnotify/fsnotify"
 	"github.com/google/uuid"
 	lru "github.com/hashicorp/golang-lru"
@@ -18,6 +20,7 @@ import (
 	"github.com/tidwall/sjson"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
@@ -31,6 +34,10 @@ var defaultSettings struct {
 	workers          int
 	lookbackDuration time.Duration
 }
+
+var (
+	logLineRegex = regexp.MustCompile(`(\s|\t)+`)
+)
 
 func init() {
 	defaultSettings.taskInterval = 30000
@@ -173,8 +180,6 @@ func (i *ingestor) Run(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	startFrom := time.Now().Add(-i.lookbackDuration).Truncate(time.Minute)
-
 	// Pod tracker
 	wg.Add(1)
 	go func() {
@@ -187,7 +192,7 @@ func (i *ingestor) Run(ctx context.Context) {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			go i.run(ctx, startFrom, workerID, keyCh)
+			go i.run(ctx, workerID, keyCh)
 		}(j)
 	}
 
@@ -301,9 +306,19 @@ func (i *ingestor) trackPods(ctx context.Context) {
 			for _, pod := range pods.Items {
 				for _, c := range pod.Spec.Containers {
 					key := fmt.Sprintf("%s/%s/%s/%s/%s", pod.Namespace, app.Type, app.Name, pod.Name, c.Name)
+					if len(app.Containers) > 0 && !StringSliceContains(app.Containers, c.Name) {
+						// Clean up if it already exists
+						if i.Contains(key) {
+							i.StopWatching(key)
+							_ = i.podInfoCache.Remove(key)
+							_ = i.podInfoCache.Remove(key + "/add-time")
+						}
+						continue
+					}
 					if !i.Contains(key) {
 						// Only add new key here, removing invalid keys will be handled by the worker.
 						i.StartWatching(key)
+						i.podInfoCache.Add(key+"/add-time", time.Now())
 						i.logger.Infow("Start watching", zap.String("namespace", pod.Namespace), zap.String("podName", pod.Name), zap.String("containerName", c.Name))
 					}
 				}
@@ -326,7 +341,8 @@ func (i *ingestor) trackPods(ctx context.Context) {
 	}
 }
 
-func (i *ingestor) run(ctx context.Context, defaultStartTime time.Time, workerID int, keyCh chan string) {
+// run is the main function of the worker.
+func (i *ingestor) run(ctx context.Context, workerID int, keyCh chan string) {
 	i.logger.Infof("Started worker %v", workerID)
 	for {
 		select {
@@ -334,81 +350,123 @@ func (i *ingestor) run(ctx context.Context, defaultStartTime time.Time, workerID
 			i.logger.Infof("Stopped worker %v", workerID)
 			return
 		case key := <-keyCh:
-			if err := i.runOnce(ctx, key, defaultStartTime, workerID); err != nil {
+			if err := i.runOnce(ctx, key, workerID); err != nil {
 				i.logger.Errorw("Failed to work on a pod", zap.String("podKey", key), zap.Error(err))
 			}
 		}
 	}
 }
 
-func (i *ingestor) runOnce(ctx context.Context, key string, defaultStartTime time.Time, workerID int) error {
-	log := i.logger.With("worker", fmt.Sprint(workerID)).With("podKey", key)
+// runOnce defines the work of processing a key for a worker
+func (i *ingestor) runOnce(ctx context.Context, key string, workerID int) error {
+	log := i.logger.With("worker", fmt.Sprint(workerID)).With("key", key)
 	log.Debugf("Working on key: %s", key)
+
+	var startTime time.Time
+	lastTimeObj, ok := i.podInfoCache.Get(key)
+	if ok {
+		startTime = lastTimeObj.(time.Time)
+	} else {
+		addTimeObj, ok := i.podInfoCache.Get(key + "/add-time")
+		if ok {
+			startTime = addTimeObj.(time.Time).Truncate(time.Minute)
+		} else {
+			return fmt.Errorf("failed to get start time for key %q", key)
+		}
+	}
+
+	endTime := startTime.Add(i.lookbackDuration)
+	if endTime.After(time.Now()) {
+		log.Debug("Skip because the lookback duration is not reached yet")
+		return nil
+	}
+
 	strs := strings.Split(key, "/")
 	if len(strs) != 5 {
 		return fmt.Errorf("invalid key %q", key)
 	}
 	namespace, appName, appType, podName := strs[0], strs[1], strs[2], strs[3]
-	logs, endTime, err := i.readPodLogs(ctx, i.k8sclient, key, defaultStartTime)
+	logs, err := i.readPodLogs(ctx, i.k8sclient, key, startTime, endTime)
 	if err != nil {
 		return fmt.Errorf("failed to read pod logs. %w", err)
 	}
-	if err := i.sendLogs(ctx, namespace, appName, appType, podName, logs, endTime); err != nil {
+	if err := i.sendLogs(ctx, namespace, appName, appType, podName, logs, startTime, endTime); err != nil {
 		return fmt.Errorf("failed to send logs. %w", err)
 	}
 	i.podInfoCache.Add(key, endTime)
 	return nil
 }
 
-func (i *ingestor) readPodLogs(ctx context.Context, k8sclient kubernetes.Interface, key string, defaultStartTime time.Time) ([]string, time.Time, error) {
+// parseLogLine parses a log line and returns the timestamp and the log message.
+func (i *ingestor) parseLogLine(log string) (bool, time.Time, string) {
+	strs := logLineRegex.Split(log, 2)
+	if len(strs) != 2 {
+		return false, time.Time{}, ""
+	}
+	t, err := dateparse.ParseStrict(strs[0])
+	if err != nil {
+		i.logger.Errorw("Failed to parse timestamp", zap.String("timestamp", strs[0]), zap.Error(err))
+		return false, time.Time{}, ""
+	}
+	return true, t, strs[1]
+}
+
+// readPodLogs reads logs from a pod/container.
+func (i *ingestor) readPodLogs(ctx context.Context, k8sclient kubernetes.Interface, key string, sinceTime, endTime time.Time) ([]string, error) {
+	i.logger.Debugw("Reading logs", zap.String("key", key), zap.Time("sinceTime", sinceTime), zap.Time("endTime", endTime))
 	strs := strings.Split(key, "/")
 	namespace, podName, containerName := strs[0], strs[3], strs[4]
-	lastTime := defaultStartTime
-	lastTimeObj, ok := i.podInfoCache.Get(key)
-	if ok {
-		lastTime = lastTimeObj.(time.Time)
-	}
 
 	stream, err := k8sclient.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{
 		Follow:     false,
 		Container:  containerName,
 		Timestamps: true,
-		SinceTime:  &metav1.Time{Time: lastTime},
+		SinceTime:  &metav1.Time{Time: sinceTime},
 	}).Stream(ctx)
 	if err != nil {
-		// Stop watching
-		i.StopWatching(key)
-		_ = i.podInfoCache.Remove(key)
-		i.logger.Infow("Stop watching", zap.String("namespace", namespace), zap.String("podName", podName), zap.String("containerName", containerName))
-		return nil, time.Time{}, err
+		if apierrors.IsNotFound(err) {
+			// Stop watching
+			i.StopWatching(key)
+			_ = i.podInfoCache.Remove(key)
+			_ = i.podInfoCache.Remove(key + "/add-time")
+			i.logger.Infow("Stop watching", zap.String("namespace", namespace), zap.String("podName", podName), zap.String("containerName", containerName))
+		}
+		return nil, err
 	}
 	defer func() { _ = stream.Close() }()
 
 	var result []string
-	endTime := lastTime.Add(i.lookbackDuration)
 	s := bufio.NewScanner(stream)
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, time.Time{}, ctx.Err()
+			return nil, ctx.Err()
 		default:
 			if !s.Scan() {
-				return result, endTime, nil
+				return result, nil
 			}
-			// TODO: check timestamp
-			if false {
-				return result, endTime, nil
+			// No way to set end time for log query, check timestamp here.
+			ok, ts, log := i.parseLogLine(s.Text())
+			if !ok {
+				continue
 			}
-			result = append(result, s.Text())
+			if ts.Before(sinceTime) {
+				continue
+			}
+			if !ts.Before(endTime) {
+				return result, nil
+			} else {
+				result = append(result, log)
+			}
 		}
 	}
 }
 
-func (i *ingestor) sendLogs(ctx context.Context, namespace, appName, appType, podName string, logs []string, endTime time.Time) error {
+func (i *ingestor) sendLogs(ctx context.Context, namespace, appName, appType, podName string, logs []string, startTime, endTime time.Time) error {
 	s := "{}"
 	s, _ = sjson.Set(s, "ts", endTime.UnixMilli())
 	s, _ = sjson.Set(s, "tid", uuid.New().String())
-	s, _ = sjson.Set(s, "start_time", endTime.Add(-i.lookbackDuration).UnixMilli())
+	s, _ = sjson.Set(s, "start_time", startTime.UnixMilli())
 	s, _ = sjson.Set(s, "end_time", endTime.UnixMilli())
 	s, _ = sjson.Set(s, "namespace", namespace)
 	s, _ = sjson.Set(s, "app_name", appName)
@@ -427,4 +485,16 @@ func (i *ingestor) sendLogs(ctx context.Context, namespace, appName, appType, po
 		fmt.Println(s)
 	}
 	return nil
+}
+
+func StringSliceContains(list []string, str string) bool {
+	if len(list) == 0 {
+		return false
+	}
+	for _, s := range list {
+		if s == str {
+			return true
+		}
+	}
+	return false
 }

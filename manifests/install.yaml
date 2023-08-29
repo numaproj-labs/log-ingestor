@@ -90,6 +90,7 @@ data:
       #- namespace: my-ns
       #  name: my-name
       #  type: deployment
+      #  containers: []
 kind: ConfigMap
 metadata:
   name: log-ingestor-config

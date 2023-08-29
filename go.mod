@@ -3,6 +3,7 @@ module github.com/numaproj-labs/log-ingestor
 go 1.20
 
 require (
+	github.com/araddon/dateparse v0.0.0-20210429162001-6b43995a97de
 	github.com/fsnotify/fsnotify v1.6.0
 	github.com/google/uuid v1.3.1
 	github.com/hashicorp/golang-lru v1.0.2

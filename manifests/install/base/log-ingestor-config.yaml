@@ -8,3 +8,4 @@ data:
       #- namespace: my-ns
       #  name: my-name
       #  type: deployment
+      #  containers: []
