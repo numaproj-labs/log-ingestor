@@ -5,6 +5,7 @@ import (
 	"container/list"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -288,7 +289,12 @@ func (i *ingestor) trackPods(ctx context.Context) {
 					i.logger.Errorw("failed to get rollout", zap.String("namespace", app.Namespace), zap.String("name", app.Name), zap.Error(err))
 					continue
 				}
-				selector = ro.Object["spec"].(map[string]interface{})["selector"].(*metav1.LabelSelector)
+				jsonData, _ := json.Marshal(ro.Object["spec"].(map[string]interface{})["selector"])
+				selector = &metav1.LabelSelector{}
+				if err := json.Unmarshal(jsonData, selector); err != nil {
+					i.logger.Errorw("failed to unmarshal rollout selector", zap.String("namespace", app.Namespace), zap.String("name", app.Name), zap.Error(err))
+					continue
+				}
 			default:
 				i.logger.Errorw("unknown application type", zap.String("type", app.Type))
 				continue
