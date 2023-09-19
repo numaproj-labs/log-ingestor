@@ -392,11 +392,17 @@ func (i *ingestor) runOnce(ctx context.Context, key string, workerID int) error 
 		return fmt.Errorf("invalid key %q", key)
 	}
 	namespace, appName, appType, podName := strs[0], strs[1], strs[2], strs[3]
+	// events
+	events, err := i.readK8sEvents(ctx, i.k8sclient, key, startTime, endTime)
+	if err != nil {
+		return fmt.Errorf("failed to read K8s events. %w", err)
+	}
+	// logs
 	logs, err := i.readPodLogs(ctx, i.k8sclient, key, startTime, endTime)
 	if err != nil {
 		return fmt.Errorf("failed to read pod logs. %w", err)
 	}
-	if err := i.sendLogs(ctx, namespace, appName, appType, podName, logs, startTime, endTime); err != nil {
+	if err := i.sendData(ctx, namespace, appName, appType, podName, logs, events, startTime, endTime); err != nil {
 		return fmt.Errorf("failed to send logs. %w", err)
 	}
 	i.podInfoCache.Add(key, endTime)
@@ -415,6 +421,31 @@ func (i *ingestor) parseLogLine(log string) (bool, time.Time, string) {
 		return false, time.Time{}, ""
 	}
 	return true, t, strs[1]
+}
+
+func (i *ingestor) readK8sEvents(ctx context.Context, k8sclient kubernetes.Interface, key string, sinceTime, endTime time.Time) ([]string, error) {
+	i.logger.Debugw("Reading K8s events", zap.String("key", key), zap.Time("sinceTime", sinceTime), zap.Time("endTime", endTime))
+	strs := strings.Split(key, "/")
+	namespace, podName := strs[0], strs[3]
+	eventsList, err := k8sclient.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	var result []string
+	for _, e := range eventsList.Items {
+		if e.Type != "Warning" {
+			continue
+		}
+		if e.LastTimestamp.Time.Before(sinceTime) || e.LastTimestamp.Time.After(endTime) {
+			continue
+		}
+		if e.InvolvedObject.Kind != "Pod" || e.InvolvedObject.Name != podName {
+			continue
+		}
+		msg := fmt.Sprintf(`time=%s type=%s reason="%s" kind=%s object=%s msg="%s"`, e.LastTimestamp.Time.Format(time.RFC3339), e.Type, e.Reason, e.InvolvedObject.Kind, e.InvolvedObject.Name, e.Message)
+		result = append(result, msg)
+	}
+	return result, nil
 }
 
 // readPodLogs reads logs from a pod/container.
@@ -468,7 +499,7 @@ func (i *ingestor) readPodLogs(ctx context.Context, k8sclient kubernetes.Interfa
 	}
 }
 
-func (i *ingestor) sendLogs(ctx context.Context, namespace, appName, appType, podName string, logs []string, startTime, endTime time.Time) error {
+func (i *ingestor) sendData(ctx context.Context, namespace, appName, appType, podName string, logs []string, events []string, startTime, endTime time.Time) error {
 	s := "{}"
 	s, _ = sjson.Set(s, "ts", endTime.UnixMilli())
 	s, _ = sjson.Set(s, "tid", uuid.New().String())
@@ -480,6 +511,9 @@ func (i *ingestor) sendLogs(ctx context.Context, namespace, appName, appType, po
 	s, _ = sjson.Set(s, "summarization_type", "pod")
 	s, _ = sjson.Set(s, "summarization_name", podName)
 	s, _ = sjson.Set(s, "logs", logs)
+	if len(events) > 0 {
+		s, _ = sjson.Set(s, "events", events)
+	}
 	// TODO:
 	if true {
 		resp, err := i.httpClient.Post(i.ingestionURL, "application/json", strings.NewReader(s))
