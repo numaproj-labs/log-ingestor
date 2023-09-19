@@ -511,9 +511,7 @@ func (i *ingestor) sendData(ctx context.Context, namespace, appName, appType, po
 	s, _ = sjson.Set(s, "summarization_type", "pod")
 	s, _ = sjson.Set(s, "summarization_name", podName)
 	s, _ = sjson.Set(s, "logs", logs)
-	if len(events) > 0 {
-		s, _ = sjson.Set(s, "events", events)
-	}
+	s, _ = sjson.Set(s, "events", events)
 	// TODO:
 	if true {
 		resp, err := i.httpClient.Post(i.ingestionURL, "application/json", strings.NewReader(s))
