@@ -397,6 +397,12 @@ func (i *ingestor) runOnce(ctx context.Context, key string, workerID int) error 
 	if err != nil {
 		return fmt.Errorf("failed to read K8s events. %w", err)
 	}
+	// evaluate pod status
+	containerTerminations, err := i.evaluateContainerStatus(ctx, i.k8sclient, key, startTime, endTime)
+	if err != nil {
+		return fmt.Errorf("failed to evaluate container status. %w", err)
+	}
+	events = append(events, containerTerminations...)
 	// logs
 	logs, err := i.readPodLogs(ctx, i.k8sclient, key, startTime, endTime)
 	if err != nil {
@@ -443,6 +449,37 @@ func (i *ingestor) readK8sEvents(ctx context.Context, k8sclient kubernetes.Inter
 			continue
 		}
 		msg := fmt.Sprintf(`time=%s type=%s reason="%s" kind=%s object=%s msg="%s"`, e.LastTimestamp.Time.Format(time.RFC3339), e.Type, e.Reason, e.InvolvedObject.Kind, e.InvolvedObject.Name, e.Message)
+		result = append(result, msg)
+	}
+	return result, nil
+}
+
+func (i *ingestor) evaluateContainerStatus(ctx context.Context, k8sclient kubernetes.Interface, key string, sinceTime, endTime time.Time) ([]string, error) {
+	i.logger.Debugw("Evaluate container status", zap.String("key", key), zap.Time("sinceTime", sinceTime), zap.Time("endTime", endTime))
+	strs := strings.Split(key, "/")
+	namespace, podName, containerName := strs[0], strs[3], strs[4]
+	pod, err := k8sclient.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var result []string
+	for _, s := range pod.Status.ContainerStatuses {
+		if s.Name != containerName {
+			continue
+		}
+		if s.LastTerminationState.Terminated == nil {
+			continue
+		}
+		if s.LastTerminationState.Terminated.FinishedAt.Time.Before(sinceTime) || s.LastTerminationState.Terminated.FinishedAt.Time.After(endTime) {
+			continue
+		}
+		msg := fmt.Sprintf(`time=%s type=%s reason="%s" kind=%s object=%s msg="%s"`,
+			s.LastTerminationState.Terminated.FinishedAt.Time.Format(time.RFC3339),
+			"Warning", s.LastTerminationState.Terminated.Reason, "Pod", podName,
+			fmt.Sprintf("Container %q terminated because of %q", containerName, s.LastTerminationState.Terminated.Reason))
 		result = append(result, msg)
 	}
 	return result, nil
